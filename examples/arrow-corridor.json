@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "箭頭走廊 / Arrow Corridor",
+  "width": 9,
+  "height": 7,
+  "tiles": [
+    "wall", "wall", "wall", "wall", "wall", "wall", "wall", "wall", "wall",
+    "wall", "floor", "right", "floor", "floor", "floor", "down", "wall", "wall",
+    "wall", "wall", "wall", "wall", "wall", "wall", "floor", "wall", "wall",
+    "wall", "wall", "wall", "wall", "wall", "wall", "floor", "wall", "wall",
+    "wall", "wall", "wall", "wall", "wall", "wall", "stop", "floor", "wall",
+    "wall", "wall", "wall", "wall", "wall", "wall", "wall", "wall", "wall",
+    "wall", "wall", "wall", "wall", "wall", "wall", "wall", "wall", "wall"
+  ],
+  "entrance": { "x": 1, "y": 1 },
+  "exits": [{ "id": "OUT-01", "x": 7, "y": 4 }]
+}
