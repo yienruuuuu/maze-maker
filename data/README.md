@@ -6,4 +6,4 @@
 - `challenge-19x19/`：10 個獨立的 19 × 19 挑戰關卡，直接匯入 `level-01.json` 到 `level-10.json` 試玩，詳見該資料夾 README。
 - 原圖保留在 `public/reference/rocket-hideout.png`，僅供獨立查看與核對。
 
-新增或修正地圖直接編輯 JSON，再以 `npm run --silent analyze -- data/rocket-hideout.json` 驗證。網頁優先載入瀏覽器已儲存的地圖；沒有儲存資料時顯示空白地圖。
+新增或修正地圖直接編輯 JSON，再以 `npm run --silent analyze -- data/rocket-hideout.json` 驗證。網頁優先載入瀏覽器已儲存的地圖；沒有儲存資料時使用 `rocket-hideout.json` 預設地圖。
