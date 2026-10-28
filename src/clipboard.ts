@@ -3,7 +3,7 @@ import type { MazeClipboard } from './selection';
 
 export type ClipboardSelection = { token: string; clip: MazeClipboard };
 const tiles = new Set(['floor', 'wall', 'block', 'up', 'right', 'down', 'left', 'stop']);
-const kinds = new Set(['item', 'stairs', 'lift', 'npc']);
+const kinds = new Set(['item', 'stairs', 'lift', 'npc', 'portal']);
 
 // Plain text makes the same data available to native paste events and clipboard.readText.
 export function encodeClipboard(clip: MazeClipboard, token: string): string {
@@ -20,7 +20,7 @@ export function decodeClipboard(text: string): ClipboardSelection {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 100 || height > 100) return invalid();
   if (!Array.isArray(data.tiles) || data.tiles.length !== width * height || !data.tiles.every(t => tiles.has(t))) return invalid();
   const point = (p: Record<string, unknown>) => p && typeof p === 'object' && Number.isInteger(p.x) && Number.isInteger(p.y) && (p.x as number) >= 0 && (p.y as number) >= 0 && (p.x as number) < width && (p.y as number) < height;
-  if (!Array.isArray(data.markers) || data.markers.length > 10_000 || !data.markers.every(m => point(m) && kinds.has(m.kind) && typeof m.label === 'string')) return invalid();
+  if (!Array.isArray(data.markers) || data.markers.length > 10_000 || !data.markers.every(m => point(m) && kinds.has(m.kind) && typeof m.label === 'string' && (m.kind !== 'portal' || m.label.trim().length > 0 && !['wall', 'block'].includes((data.tiles as Tile[])[(m.y as number) * width + (m.x as number)])))) return invalid();
   if (!Array.isArray(data.review) || data.review.length > 10_000 || !data.review.every(p => point(p) && typeof p.reason === 'string')) return invalid();
   // Construct only supported fields: clipboard contents can never introduce In/Out.
   return { token: data.token, clip: {

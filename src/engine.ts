@@ -2,7 +2,7 @@ export type Tile = 'floor' | 'wall' | 'block' | 'up' | 'right' | 'down' | 'left'
 export type Direction = 'up' | 'right' | 'down' | 'left';
 export type Point = { x: number; y: number };
 export type Exit = Point & { id: string };
-export type Marker = Point & { label: string; kind: 'item' | 'stairs' | 'lift' | 'npc' };
+export type Marker = Point & { label: string; kind: 'item' | 'stairs' | 'lift' | 'npc' | 'portal' };
 export type ReviewCell = Point & { reason: string };
 export type Maze = { version: 1; name: string; width: number; height: number; tiles: Tile[]; entrance: Point; exits: Exit[]; appearance?: 'rocket'; markers?: Marker[]; review?: ReviewCell[] };
 export const directions: Direction[] = ['up', 'right', 'down', 'left'];
@@ -12,24 +12,32 @@ export const key = (p: Point) => `${p.x},${p.y}`;
 export const inside = (m: Maze, p: Point) => p.x >= 0 && p.y >= 0 && p.x < m.width && p.y < m.height;
 export const tileAt = (m: Maze, p: Point): Tile => inside(m, p) ? m.tiles[p.y * m.width + p.x] : 'wall';
 export const solid = (tile: Tile) => tile === 'wall' || tile === 'block';
-export type Move = { end: Point; trace: Point[]; sliding: boolean[]; loop: boolean };
+export type Move = { end: Point; trace: Point[]; sliding: boolean[]; teleported: boolean[]; loop: boolean };
 // A command starts with one voluntary step; forced motion runs to rest or a repeated (position, direction).
 export function move(m: Maze, start: Point, direction: Direction): Move {
   let p = start, d = direction, forced = false;
-  const trace: Point[] = [], sliding: boolean[] = [], seen = new Set<string>();
+  const trace: Point[] = [], sliding: boolean[] = [], teleported: boolean[] = [], seen = new Set<string>();
   while (true) {
     const [dx, dy] = vectors[d], next = { x: p.x + dx, y: p.y + dy };
-    if (solid(tileAt(m, next))) return { end: p, trace, sliding, loop: false };
-    p = next; trace.push(p); sliding.push(forced);
+    if (solid(tileAt(m, next))) return { end: p, trace, sliding, teleported, loop: false };
+    p = next; trace.push(p); sliding.push(forced); teleported.push(false);
+    const portal = m.markers?.find(marker => marker.kind === 'portal' && same(marker, p));
+    if (portal) {
+      const pair = (m.markers ?? []).filter(marker => marker.kind === 'portal' && marker.label === portal.label);
+      if (pair.length === 2 && pair.every(marker => !solid(tileAt(m, marker)))) {
+        const target = pair.find(marker => !same(marker, p));
+        if (target) { p = { x: target.x, y: target.y }; trace.push(p); sliding.push(false); teleported.push(true); return { end: p, trace, sliding, teleported, loop: false }; }
+      }
+    }
     const tile = tileAt(m, p);
     if (directions.includes(tile as Direction)) { d = tile as Direction; forced = true; }
-    else if (tile === 'stop' || !forced) return { end: p, trace, sliding, loop: false };
+    else if (tile === 'stop' || !forced) return { end: p, trace, sliding, teleported, loop: false };
     const state = `${key(p)}:${d}`;
-    if (seen.has(state)) return { end: p, trace, sliding, loop: true };
+    if (seen.has(state)) return { end: p, trace, sliding, teleported, loop: true };
     seen.add(state);
   }
 }
-export type Route = { exit: Exit; reachable: boolean; commands: Direction[]; trace: Point[]; sliding: boolean[] };
+export type Route = { exit: Exit; reachable: boolean; commands: Direction[]; trace: Point[]; sliding: boolean[]; teleported: boolean[] };
 export function analyze(m: Maze): { routes: Route[]; reachable: Point[]; loopTransitions: number } {
   const queue: Point[] = [m.entrance];
   const previous = new Map<string, { from: Point; direction: Direction; move: Move }>();
@@ -51,7 +59,7 @@ export function analyze(m: Maze): { routes: Route[]; reachable: Point[]; loopTra
     let p: Point = exit;
     while (previous.has(key(p))) { const step = previous.get(key(p))!; segments.push(step); p = step.from; }
     segments.reverse();
-    return { exit, reachable: visited.has(key(exit)), commands: segments.map(s => s.direction), trace: [m.entrance, ...segments.flatMap(s => s.move.trace)], sliding: [false, ...segments.flatMap(s => s.move.sliding)] };
+    return { exit, reachable: visited.has(key(exit)), commands: segments.map(s => s.direction), trace: [m.entrance, ...segments.flatMap(s => s.move.trace)], sliding: [false, ...segments.flatMap(s => s.move.sliding)], teleported: [false, ...segments.flatMap(s => s.move.teleported)] };
   });
   return { routes, reachable: queue, loopTransitions };
 }
@@ -76,7 +84,7 @@ export function parseMaze(value: unknown): Maze {
   const valid = (p: Point) => p && Number.isInteger(p.x) && Number.isInteger(p.y) && inside(m,p) && !solid(tileAt(m,p));
   if (!valid(m.entrance) || !Array.isArray(m.exits) || !m.exits.every(e => valid(e) && typeof e.id === 'string') || new Set(m.exits.map(e => e.id)).size !== m.exits.length) throw Error('入口／出口資料不正確。');
   if (m.appearance !== undefined && m.appearance !== 'rocket') throw Error('未知的地圖外觀。');
-  if (m.markers !== undefined && (!Array.isArray(m.markers) || !m.markers.every(p => p && inside(m,p) && Number.isInteger(p.x) && Number.isInteger(p.y) && typeof p.label === 'string' && ['item','stairs','lift','npc'].includes(p.kind)))) throw Error('參考標記格式不正確。');
+  if (m.markers !== undefined && (!Array.isArray(m.markers) || !m.markers.every(p => p && inside(m,p) && Number.isInteger(p.x) && Number.isInteger(p.y) && typeof p.label === 'string' && ['item','stairs','lift','npc','portal'].includes(p.kind) && (p.kind !== 'portal' || (p.label.trim().length > 0 && valid(p)))))) throw Error('參考標記格式不正確。');
   if (m.review !== undefined && (!Array.isArray(m.review) || !m.review.every(p => p && inside(m,p) && Number.isInteger(p.x) && Number.isInteger(p.y) && typeof p.reason === 'string'))) throw Error('待核對座標格式不正確。');
   return structuredClone(m);
 }

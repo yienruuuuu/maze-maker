@@ -1,10 +1,11 @@
 import { inside, same, solid, type Marker, type Maze, type Point } from './engine';
 
-export type MarkerTool = 'item' | 'stairs' | 'npc';
-export const markerNames: Record<MarkerTool, string> = { item: '道具', stairs: '樓梯', npc: '人物' };
+export type MarkerTool = 'item' | 'stairs' | 'npc' | 'portal';
+export const markerNames: Record<MarkerTool, string> = { item: '道具', stairs: '樓梯', npc: '人物', portal: 'A' };
 
 export function placeMarker(maze: Maze, point: Point, kind: MarkerTool, label: string): Maze {
   if (!inside(maze, point) || solid(maze.tiles[point.y * maze.width + point.x])) return maze;
+  if (kind === 'portal' && (maze.markers ?? []).filter(m => m.kind === 'portal' && m.label === (label.trim() || 'A') && !same(m, point)).length >= 2) return maze;
   const marker: Marker = { ...point, kind, label: label.trim() || markerNames[kind] };
   return { ...maze, markers: [...(maze.markers ?? []).filter(m => !same(m, point)), marker] };
 }

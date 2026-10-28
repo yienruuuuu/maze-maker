@@ -37,3 +37,7 @@ canvas{image-rendering:pixelated}.tool-icon{image-rendering:pixelated}
 .selection-actions{border-top:1px solid #334139;padding-top:12px;margin-bottom:16px;flex-shrink:0}.selection-count{font-size:11px;color:#9eeaf3;margin:8px 0}.selection-buttons{display:grid;grid-template-columns:1fr 1fr;gap:5px}.selection-buttons button{padding:8px 4px;font-size:11px}.selection-actions small{display:block;color:#8ba398;font-size:10px;line-height:1.7;margin-top:8px}
 
 @media(min-width:601px){.tool{padding:6px 3px;gap:4px}.tool>span:last-of-type{font-size:10px;line-height:1.2}}
+
+.item-progress{padding:12px 6px;border:1px solid #47614b;border-radius:7px;background:#203127;display:flex;flex-direction:column;gap:5px;align-items:center}.item-progress>span,.item-progress small{font-size:10px;color:#acc3aa}.item-progress b{font-size:22px;color:#e4f6c9;font-variant-numeric:tabular-nums}.item-progress.complete{border-color:#baff70;box-shadow:0 0 10px #baff7022}.item-progress.complete small{color:#baff70}
+
+.header-actions{flex-wrap:wrap;justify-content:flex-end}.header{height:auto;min-height:60px}.header-actions>button{white-space:nowrap}

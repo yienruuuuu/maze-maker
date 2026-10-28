@@ -7,10 +7,12 @@ import { createItemArtwork, createNpcArtwork, createStairsArtwork, drawArtwork, 
 
 import { clearSelection, copySelection, pasteError, pasteSelection, rectangle, type MazeClipboard, type Selection } from './selection';
 import { decodeClipboard, encodeClipboard } from './clipboard';
+import { collectAt, indexItems, startCollection } from './play';
+import { portalColor, portalUrl } from './portalArtwork';
 import { markerNames, placeMarker, removeMarker, type MarkerTool } from './markers';
 
 type Tool = Tile | 'entrance' | 'exit' | 'removeExit' | MarkerTool | 'removeMarker' | 'select';
-const markerTools: MarkerTool[] = ['item', 'stairs', 'npc'];
+const markerTools: MarkerTool[] = ['item', 'stairs', 'npc', 'portal'];
 const isMarkerTool = (tool: Tool): tool is MarkerTool => markerTools.includes(tool as MarkerTool);
 const tools: { id: Tool; icon: string; name: string; hint: string }[] = [
   { id: 'select', icon: '⬚', name: '選擇', hint: '點選或拖曳框選；刪除、複製、剪下與貼上' },
@@ -65,13 +67,28 @@ export default function App() {
   const [ready, setReady] = useState(false), [saved, setSaved] = useState('載入中');
   const [exporting, setExporting] = useState(false);
   const exportPending = useRef(false);
+  const [jsonClipboardBusy, setJsonClipboardBusy] = useState(false);
+  const jsonClipboardPending = useRef(false);
   const [tool, setTool] = useState<Tool>('wall'), [mode, setMode] = useState<'edit' | 'play'>('edit');
   const [autoFit, setAutoFit] = useState(true), [showAnalysis, setShowAnalysis] = useState(true);
   const [zoom, setZoom] = useState(1), [selected, setSelected] = useState('OUT-01');
-  const [showRoute, setShowRoute] = useState(true), [showReach, setShowReach] = useState(false);
+  const [showRoute, setShowRoute] = useState(false), [showReach, setShowReach] = useState(false);
   const [showMarkers, setShowMarkers] = useState(true), [showReview, setShowReview] = useState(false);
+  const [collectedItems, setCollectedItems] = useState<Set<number>>(() => startCollection(maze));
+  const collectedLive = useRef(collectedItems);
+  const items = useMemo(() => indexItems(maze), [maze]);
   const [player, setPlayer] = useState<Point>(maze.entrance), [moves, setMoves] = useState(0);
   const [notice, setNotice] = useState(''), [historyVersion, setHistoryVersion] = useState(0);
+  const [portalArt, setPortalArt] = useState<Map<string, HTMLImageElement>>(new Map());
+  const portalGroups = [...new Set((maze.markers ?? []).filter(m => m.kind === 'portal').map(m => m.label))];
+  useEffect(() => {
+    let active = true;
+    for (const group of portalGroups) {
+      if (portalArt.has(group)) continue;
+      const image = new Image(); image.onload = () => { if (active) setPortalArt(previous => new Map(previous).set(group, image)); }; image.src = portalUrl(group);
+    }
+    return () => { active = false; };
+  }, [JSON.stringify(portalGroups), portalArt]);
   const [markerLabel, setMarkerLabel] = useState('道具');
   const [selection, setSelection] = useState<Selection | null>(null);
   const [clipboard, setClipboard] = useState<MazeClipboard | null>(null);
@@ -101,7 +118,7 @@ export default function App() {
   function stopAnimation() { if (animation.current) clearInterval(animation.current); animation.current = null; busy.current = false; setIsBusy(false); }
   useEffect(() => {
     let active = true;
-    load().then(m => { if (active && m) { setMaze(m); setPlayer(m.entrance); } }).catch(() => { if (active) setNotice('無法讀取本機儲存，已載入預設地圖；仍可匯入／匯出 JSON。'); }).finally(() => { if (active) setReady(true); });
+    load().then(m => { if (active && m) { setMaze(m); setPlayer(m.entrance); resetCollection(m); } }).catch(() => { if (active) setNotice('無法讀取本機儲存，已載入預設地圖；仍可匯入／匯出 JSON。'); }).finally(() => { if (active) setReady(true); });
     return () => { active = false; if (animation.current) clearInterval(animation.current); };
   }, []);
   useEffect(() => {
@@ -115,15 +132,16 @@ export default function App() {
     clipboardRequest.current++;
     setPasting(false); setPasteAt(null); setCutSource(null);
     past.current.push(live.current); past.current = past.current.slice(-100); future.current = [];
-    setMaze(next); live.current = next; setHistoryVersion(v => v + 1); stopAnimation(); setPlayer(next.entrance); setMoves(0);
+    setMaze(next); live.current = next; setHistoryVersion(v => v + 1); stopAnimation(); setPlayer(next.entrance); resetCollection(next); setMoves(0);
   }
   function history(redo: boolean) {
     cancelSelection();
     const source = redo ? future.current : past.current, target = redo ? past.current : future.current;
     const next = source.pop(); if (!next) return;
-    target.push(live.current); setMaze(next); live.current = next; setHistoryVersion(v => v + 1); setPlayer(next.entrance); setMoves(0); stopAnimation();
+    target.push(live.current); setMaze(next); live.current = next; setHistoryVersion(v => v + 1); setPlayer(next.entrance); resetCollection(next); setMoves(0); stopAnimation();
   }
-  function restart() { cancelSelection(); stopAnimation(); setPlayer(maze.entrance); setMoves(0); setNotice(''); }
+  function resetCollection(next: Maze) { const initial = startCollection(next); collectedLive.current = initial; setCollectedItems(initial); }
+  function restart() { cancelSelection(); stopAnimation(); setPlayer(maze.entrance); resetCollection(maze); setMoves(0); setNotice(''); }
   function command(direction: Direction) {
     if (busy.current) return;
     const result = move(maze, player, direction);
@@ -131,7 +149,13 @@ export default function App() {
     setMoves(n => n + 1); busy.current = true; setIsBusy(true); setNotice('');
     let i = 0;
     animation.current = setInterval(() => {
-      setPlayer(result.trace[i++]);
+      const position = result.trace[i++];
+      setPlayer(position);
+      const collected = collectAt(items, position, collectedLive.current);
+      if (collected !== collectedLive.current) {
+        collectedLive.current = collected; setCollectedItems(collected);
+        setNotice(collected.size === items.total ? '全部道具已收集！' : `取得道具！還剩 ${items.total - collected.size} 個。`);
+      }
       if (i === result.trace.length) {
         stopAnimation();
         if (result.loop) { setNotice('陷入滑行循環。請重來。'); busy.current = true; setIsBusy(true); }
@@ -215,7 +239,7 @@ export default function App() {
     }
     if (isMarkerTool(tool) || tool === 'removeMarker') {
       const next = tool === 'removeMarker' ? removeMarker(live.current, p) : placeMarker(live.current, p, tool, markerLabel);
-      if (next === live.current && tool !== 'removeMarker') setNotice('標記只能放在可站立格。');
+      if (next === live.current && tool !== 'removeMarker') setNotice(tool === 'portal' ? '傳送點須放在可站立格，同組最多兩個；請更換組別或先刪除舊點。' : '標記只能放在可站立格。');
       else { commit(next); setNotice(''); if (tool !== 'removeMarker') setShowMarkers(true); }
       return;
     }
@@ -279,7 +303,7 @@ export default function App() {
       ctx.save();
       ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = routeColor;
       for (let i = 1; i < route.trace.length; i++) {
-        const a = route.trace[i - 1], b = route.trace[i]; ctx.setLineDash(route.sliding[i] ? [4, 4] : []);
+        const a = route.trace[i - 1], b = route.trace[i]; ctx.setLineDash(route.teleported[i] ? [2, 7] : route.sliding[i] ? [4, 4] : []);
         ctx.beginPath(); ctx.moveTo((a.x + .5) * CELL, (a.y + .5) * CELL); ctx.lineTo((b.x + .5) * CELL, (b.y + .5) * CELL);
         ctx.shadowBlur = 0; ctx.strokeStyle = '#190c29'; ctx.lineWidth = 9; ctx.stroke();
         ctx.shadowColor = routeColor; ctx.shadowBlur = 13;
@@ -289,17 +313,19 @@ export default function App() {
       ctx.restore();
     }
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    if (showMarkers) for (const marker of maze.markers ?? []) {
-      const symbols = { stairs: '≋', item: '●', lift: '▥', npc: '♟' };
-      const artwork = marker.kind === 'item' ? itemArt : marker.kind === 'npc' ? npcArt : stairsArt;
+    for (const [index, marker] of (maze.markers ?? []).entries()) {
+      if (!showMarkers && !(mode === 'play' && (marker.kind === 'item' || marker.kind === 'portal'))) continue;
+      if (mode === 'play' && marker.kind === 'item' && collectedItems.has(index)) continue;
+      const symbols = { stairs: '≋', item: '●', lift: '▥', npc: '♟', portal: '✡' };
+      const artwork = marker.kind === 'portal' ? portalArt.get(marker.label) : marker.kind === 'item' ? itemArt : marker.kind === 'npc' ? npcArt : stairsArt;
       if (artwork) {
         const w = marker.kind === 'item' ? 20 : marker.kind === 'npc' ? 24 : 32;
         const h = marker.kind === 'npc' ? 36 : w;
         ctx.drawImage(artwork, marker.x * CELL + (CELL - w) / 2, marker.y * CELL + CELL - h, w, h);
       } else {
-        ctx.fillStyle = '#d2d9aa'; ctx.font = 'bold 21px system-ui'; ctx.fillText(symbols[marker.kind],(marker.x+.5)*CELL,(marker.y+.5)*CELL);
+        ctx.fillStyle = marker.kind === 'portal' ? portalColor(marker.label) : '#d2d9aa'; ctx.font = 'bold 21px system-ui'; ctx.fillText(symbols[marker.kind],(marker.x+.5)*CELL,(marker.y+.5)*CELL);
       }
-      if (mode === 'edit') { ctx.font = 'bold 12px system-ui'; const labelWidth=ctx.measureText(marker.label).width+8; const lx=Math.max(labelWidth/2,Math.min(width-labelWidth/2,(marker.x+.5)*CELL)); ctx.fillStyle='#131b22dd';ctx.fillRect(lx-labelWidth/2,(marker.y+1)*CELL,labelWidth,17); ctx.fillStyle='#f5f1d8';ctx.fillText(marker.label,lx,(marker.y+1)*CELL+8); }
+      if (mode === 'edit' || marker.kind === 'portal') { ctx.font = 'bold 12px system-ui'; const labelWidth=ctx.measureText(marker.kind === 'portal' ? `${marker.label}${(maze.markers ?? []).filter(m => m.kind === 'portal' && m.label === marker.label).length === 2 ? '' : ' ⚠'}` : marker.label).width+8; const lx=Math.max(labelWidth/2,Math.min(width-labelWidth/2,(marker.x+.5)*CELL)); ctx.fillStyle='#131b22dd';ctx.fillRect(lx-labelWidth/2,(marker.y+1)*CELL,labelWidth,17); ctx.fillStyle='#f5f1d8';ctx.fillText(marker.kind === 'portal' ? `${marker.label}${(maze.markers ?? []).filter(m => m.kind === 'portal' && m.label === marker.label).length === 2 ? '' : ' ⚠'}` : marker.label,lx,(marker.y+1)*CELL+8); }
     }
     if (showReview && mode === 'edit') { ctx.strokeStyle='#ffae37';ctx.lineWidth=2;ctx.setLineDash([3,3]); for(const p of maze.review ?? []) ctx.strokeRect(p.x*CELL+2,p.y*CELL+2,CELL-4,CELL-4); ctx.setLineDash([]); }
     const badge = (p: Point, label: string, color: string, core: string, background: string) => {
@@ -335,14 +361,14 @@ export default function App() {
           else { ctx.fillStyle = solid(t) ? '#46565a' : '#30483c'; ctx.fillRect(px, py, CELL, CELL); if (arrows[t]) { ctx.fillStyle = '#d0edc7'; ctx.font = 'bold 22px system-ui'; ctx.fillText(arrows[t], px + CELL / 2, py + CELL / 2); } }
         }
         for (const m of clipboard.markers) {
-          const art = m.kind === 'item' ? itemArt : m.kind === 'npc' ? npcArt : stairsArt;
+          const art = m.kind === 'portal' ? portalArt.get(m.label) : m.kind === 'item' ? itemArt : m.kind === 'npc' ? npcArt : stairsArt;
           if (art) { const w = m.kind === 'item' ? 20 : m.kind === 'npc' ? 24 : 32, h = m.kind === 'npc' ? 36 : w; ctx.drawImage(art, (pasteAt.x + m.x) * CELL + (CELL - w) / 2, (pasteAt.y + m.y) * CELL + CELL - h, w, h); }
         }
         ctx.restore();
         outline({ ...pasteAt, width: clipboard.width, height: clipboard.height }, pasteError(maze, clipboard, pasteAt) ? '#ff5575' : '#79ffb1');
       }
     }
-  }, [maze, player, mode, showRoute, showReach, route, routeColor, analysis, showMarkers, showReview, tileArt, itemArt, stairsArt, npcArt, tool, selection, clipboard, pasting, pasteAt, cutSource]);
+  }, [maze, player, mode, showRoute, showReach, route, routeColor, analysis, showMarkers, showReview, tileArt, itemArt, stairsArt, npcArt, tool, selection, clipboard, pasting, pasteAt, cutSource, collectedItems, portalArt]);
   function point(e: React.PointerEvent<HTMLCanvasElement>): Point {
     const rect = e.currentTarget.getBoundingClientRect();
     return { x: Math.floor((e.clientX - rect.left) / rect.width * maze.width), y: Math.floor((e.clientY - rect.top) / rect.height * maze.height) };
@@ -376,6 +402,39 @@ export default function App() {
     else if (JSON.stringify(before) !== JSON.stringify(live.current)) { past.current.push(before); past.current = past.current.slice(-100); future.current = []; setHistoryVersion(v => v + 1); }
   }
   function replace(next: Maze) { if (window.confirm('取代目前地圖？可使用復原回到此版本。')) { cancelSelection(); commit(next); setSelected(next.exits[0]?.id ?? ''); setMode('edit'); setNotice(''); } }
+  async function copyJson() {
+    if (!ready || jsonClipboardPending.current) return;
+    jsonClipboardPending.current = true; setJsonClipboardBusy(true);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('unavailable');
+      await navigator.clipboard.writeText(JSON.stringify(live.current));
+      setNotice('完整地圖 JSON 已複製到系統剪貼簿。');
+    } catch {
+      setNotice('無法複製json文本，請允許瀏覽器剪貼簿權限，或使用「匯出json檔」存成檔案。');
+    } finally { jsonClipboardPending.current = false; setJsonClipboardBusy(false); }
+  }
+  async function pasteJson() {
+    if (!ready || jsonClipboardPending.current || stroke.current || selectionDrag.current) return;
+    jsonClipboardPending.current = true; setJsonClipboardBusy(true);
+    cancelSelection();
+    const request = clipboardRequest.current, before = live.current;
+    try {
+      let text: string;
+      try {
+        if (!navigator.clipboard?.readText) throw new Error('unavailable');
+        text = await navigator.clipboard.readText();
+      } catch {
+        if (request === clipboardRequest.current) setNotice('無法貼上json文本，請允許瀏覽器剪貼簿權限，或使用「匯入json檔」。');
+        return;
+      }
+      if (request !== clipboardRequest.current || before !== live.current) return;
+      // Use exactly the same validator and replacement flow as file import.
+      const next = parseMaze(JSON.parse(text));
+      replace(next);
+    } catch (error) {
+      if (request === clipboardRequest.current) setNotice(`剪貼簿不是有效的完整地圖 JSON：${error instanceof Error ? error.message : String(error)}`);
+    } finally { jsonClipboardPending.current = false; setJsonClipboardBusy(false); }
+  }
   async function download() {
     if (exportPending.current) return;
     exportPending.current = true; setExporting(true);
@@ -392,13 +451,13 @@ export default function App() {
   }
   const solved = analysis.routes.filter(r => r.reachable).length;
   return <div className="app" data-history={historyVersion}>
-    <header className="header"><div className="brand"><span className="brand-mark">↱</span><div>MAZE<span className="brand-light">LAB</span><small>迷宮設計實驗室</small></div></div><div className="project"><span className="green-dot"/><input aria-label="地圖名稱" value={maze.name} disabled={!ready || mode === 'play'} onChange={e => commit({ ...maze, name: e.target.value })}/><span className="version">LOCAL / V.01</span></div><div className="header-actions"><details className="help-menu"><summary>操作說明</summary><div className="help-content"><h3>操作與規則</h3><p>編輯：選筆刷後拖曳繪製；Ctrl / ⌘ Z 復原，Shift + Z 重做。</p><p>選擇：點選或拖曳框選；Delete 刪除、Ctrl / ⌘ C 複製、X 剪下、V 預覽貼上，點擊目的地確認。Esc 取消；剪下確認前不改動地圖。</p><p>標記：選道具、樓梯或人物，設定名稱後點格子放置；同格取代。樓梯只是標記，出口需另外設定。</p><p>遊玩：方向鍵、WASD 或左側方向按鈕。踩箭頭強制滑行、途中箭頭轉向；停止格或撞牆會停止。</p><p>停在出口即成功。陷入循環時按「從入口重來」。實線為步行，虛線為滑行。</p><p>按「符合視窗」看完整地圖；手動放大後可捲動查看。</p><p>匯入 JSON 載入地圖；自動儲存只存在瀏覽器，需匯出才能存回檔案。</p></div></details><button onClick={() => file.current?.click()} disabled={!ready}>↥ 匯入</button><button onClick={download} disabled={!ready || exporting}>{exporting ? '儲存中…' : '↧ 匯出 JSON'}</button><button className="primary" disabled={!ready} onClick={() => { restart(); setMode(mode === 'edit' ? 'play' : 'edit'); }}>{mode === 'edit' ? '▷ 試玩迷宮' : '✎ 返回編輯'}</button></div></header>
+    <header className="header"><div className="brand"><span className="brand-mark">↱</span><div>MAZE<span className="brand-light">LAB</span><small>迷宮設計實驗室</small></div></div><div className="project"><span className="green-dot"/><input aria-label="地圖名稱" value={maze.name} disabled={!ready || mode === 'play'} onChange={e => commit({ ...maze, name: e.target.value })}/><span className="version">LOCAL / V.01</span></div><div className="header-actions"><details className="help-menu"><summary>操作說明</summary><div className="help-content"><h3>操作與規則</h3><p>編輯：選筆刷後拖曳繪製；Ctrl / ⌘ Z 復原，Shift + Z 重做。</p><p>選擇：點選或拖曳框選；Delete 刪除、Ctrl / ⌘ C 複製、X 剪下、V 預覽貼上，點擊目的地確認。Esc 取消；剪下確認前不改動地圖。</p><p>標記：選道具、樓梯或人物，設定名稱後點格子放置；同格取代。樓梯只是標記，出口需另外設定。</p><p>遊玩：方向鍵、WASD 或左側方向按鈕。踩箭頭強制滑行、途中箭頭轉向；停止格或撞牆會停止。</p><p>傳送點：相同組別放兩點。走入或滑過即傳送並停止；離開再踩入才會再次觸發。⚠ 表示配對不完整，暫不傳送。路線點線表示傳送。</p><p>道具碰到即收集，滑行經過也算；左側顯示進度。重來會恢復道具，返回編輯保留完整地圖。</p><p>停在出口即成功，不必收齊道具。陷入循環時按「從入口重來」。出口路線預設隱藏，可自行勾選顯示；實線為步行，虛線為滑行。</p><p>按「符合視窗」看完整地圖；手動放大後可捲動查看。</p><p>「複製json文本」複製完整地圖至系統剪貼簿；「貼上json文本」讀取並驗證完整地圖，確認取代後可復原。與選取範圍的複製貼上分開使用。</p><p>「匯入json檔」載入地圖；自動儲存只存在瀏覽器，需匯出才能存回檔案。</p></div></details><button onClick={() => file.current?.click()} disabled={!ready}>匯入json檔</button><button onClick={download} disabled={!ready || exporting}>{exporting ? '儲存中…' : '匯出json檔'}</button><button onClick={copyJson} disabled={!ready || jsonClipboardBusy}>複製json文本</button><button onClick={pasteJson} disabled={!ready || jsonClipboardBusy}>貼上json文本</button><button className="primary" disabled={!ready} onClick={() => { restart(); setMode(mode === 'edit' ? 'play' : 'edit'); }}>{mode === 'edit' ? '▷ 試玩迷宮' : '✎ 返回編輯'}</button></div></header>
     <div className={`workspace ${mode === 'play' ? 'playing' : showAnalysis ? '' : 'analysis-hidden'}`}>
       <aside className="sidebar"><div className="mode-switch"><button className={mode === 'edit' ? 'active' : ''} onClick={() => { restart(); setMode('edit'); }}>✎ 編輯</button><button className={mode === 'play' ? 'active' : ''} onClick={() => { restart(); setMode('play'); }}>▷ 遊玩</button></div>
       <div className="section-label">{mode === 'edit' ? '繪製工具' : '遊玩控制'}<span>{mode === 'edit' ? 'BRUSHES' : 'CONTROLS'}</span></div>
-      {mode === 'edit' ? <div className="tools">{tools.map(t => <button disabled={!ready} title={t.hint} key={t.id} className={`tool ${tool === t.id ? 'selected' : ''}`} onClick={() => chooseTool(t.id)}><span className={`tool-icon ${t.id}`} style={tilePreview(t.id)}>{t.icon}</span><span>{t.name}</span>{tool === t.id && <i/>}</button>)}</div> : <div className="play-controls"><div className="dpad">{(['up','left','down','right'] as Direction[]).map(d => <button className={d} disabled={isBusy} key={d} onClick={() => command(d)} aria-label={d}>{arrows[d]}</button>)}</div><strong>{moves} <small>次操作</small></strong><button onClick={restart}>↻ 從入口重來</button></div>}
+      {mode === 'edit' ? <div className="tools">{tools.map(t => <button disabled={!ready} title={t.hint} key={t.id} className={`tool ${tool === t.id ? 'selected' : ''}`} onClick={() => chooseTool(t.id)}><span className={`tool-icon ${t.id}`} style={tilePreview(t.id)}>{t.icon}</span><span>{t.name}</span>{tool === t.id && <i/>}</button>)}</div> : <div className="play-controls"><div className="dpad">{(['up','left','down','right'] as Direction[]).map(d => <button className={d} disabled={isBusy} key={d} onClick={() => command(d)} aria-label={d}>{arrows[d]}</button>)}</div><strong>{moves} <small>次操作</small></strong>{items.total > 0 && <div className={`item-progress ${collectedItems.size === items.total ? 'complete' : ''}`} aria-label="道具收集進度" aria-live="polite"><span>道具</span><b>{collectedItems.size} / {items.total}</b><small>{collectedItems.size === items.total ? '已全部收集' : `剩餘 ${items.total - collectedItems.size} 個`}</small></div>}<button onClick={restart}>↻ 從入口重來</button></div>}
       {mode === 'edit' && tool === 'select' && <section className="selection-actions"><div className="section-label">選取操作</div><p className="selection-count">{pasting ? '移動滑鼠預覽，點擊貼上' : selection ? `已選 ${selection.width} × ${selection.height} 格` : '點選單格或拖曳框選'}</p><div className="selection-buttons"><button disabled={!selection || pasting} onClick={() => copyRegion()}>複製</button><button disabled={!selection || pasting} onClick={() => copyRegion(true)}>剪下</button><button disabled={!ready} onClick={startPaste}>貼上</button><button disabled={!selection || pasting} onClick={deleteRegion}>刪除選取</button><button disabled={!selection && !pasting} onClick={() => { cancelSelection(); setNotice(''); }}>取消選取</button></div><small>Ctrl / ⌘ C、X、V · Delete · Esc<br/>IN／OUT 不複製；刪除保留 IN。</small></section>}
-      {mode === 'edit' && <section className="marker-tools"><div className="section-label">標記<span>MARKERS</span></div><div className="tools">{markerTools.map(kind => { const art = kind === 'item' ? itemArt : kind === 'stairs' ? stairsArt : npcArt; return <button key={kind} disabled={!ready} className={`tool ${tool === kind ? 'selected' : ''}`} onClick={() => { chooseTool(kind); setMarkerLabel(markerNames[kind]); }} title={`放置${markerNames[kind]}標記`}><span className="marker-preview">{art ? <img src={art.toDataURL()} alt=""/> : '◇'}</span><span>{markerNames[kind]}</span></button>; })}<button disabled={!ready} className={`tool ${tool === 'removeMarker' ? 'selected' : ''}`} onClick={() => chooseTool('removeMarker')} title="只刪除標記，保留地形與端點"><span className="tool-icon">×</span><span>刪除標記</span></button></div>{isMarkerTool(tool) && <label className="marker-name">標記名稱<input value={markerLabel} onChange={e => setMarkerLabel(e.target.value)} placeholder={markerNames[tool]}/><small>點格子放置或取代，保留原地形。</small></label>}</section>}
+      {mode === 'edit' && <section className="marker-tools"><div className="section-label">標記<span>MARKERS</span></div><div className="tools">{markerTools.map(kind => { const art = kind === 'item' ? itemArt : kind === 'stairs' ? stairsArt : kind === 'portal' ? null : npcArt; return <button key={kind} disabled={!ready} className={`tool ${tool === kind ? 'selected' : ''}`} onClick={() => { chooseTool(kind); setMarkerLabel(markerNames[kind]); }} title={`放置${kind === 'portal' ? '傳送點' : markerNames[kind]}標記`}><span className="marker-preview">{kind === 'portal' ? <img src={portalUrl('A')} alt=""/> : art ? <img src={art.toDataURL()} alt=""/> : '◇'}</span><span>{kind === 'portal' ? '傳送點' : markerNames[kind]}</span></button>; })}<button disabled={!ready} className={`tool ${tool === 'removeMarker' ? 'selected' : ''}`} onClick={() => chooseTool('removeMarker')} title="只刪除標記，保留地形與端點"><span className="tool-icon">×</span><span>刪除標記</span></button></div>{isMarkerTool(tool) && <label className="marker-name">{tool === 'portal' ? '傳送組別' : '標記名稱'}<input value={markerLabel} onChange={e => setMarkerLabel(e.target.value)} placeholder={markerNames[tool]}/><small>{tool === 'portal' ? `同組放兩點、顏色相同。${(maze.markers ?? []).filter(m => m.kind === 'portal' && m.label === (markerLabel.trim() || 'A')).length} / 2 已放置；換組別可新增一對。` : '點格子放置或取代，保留原地形。'}</small></label>}</section>}
       {mode === 'edit' && <details className="sidebar-bottom"><summary>建立新地圖</summary><div className="size-fields"><label>寬<input type="number" min="5" max="100" value={size.width} onChange={e => setSize(s => ({ ...s, width: Number(e.target.value) }))}/></label><span>×</span><label>高<input type="number" min="5" max="100" value={size.height} onChange={e => setSize(s => ({ ...s, height: Number(e.target.value) }))}/></label></div><button className="full" disabled={!ready || !Number.isInteger(size.width) || !Number.isInteger(size.height) || size.width < 5 || size.width > 100 || size.height < 5 || size.height > 100} onClick={() => replace(blank(size.width,size.height))}>＋ 建立空白地圖</button><button className="text-button" disabled={!ready} onClick={() => replace(demo())}>載入機關範例 ↗</button></details>}</aside>
       <main className="editor"><div className="editor-toolbar"><div className="breadcrumb">迷宮工作台 <span>/</span> <b>{mode === 'edit' ? '地圖編輯' : '實際遊玩'}</b></div><div className="toolbar-actions"><button aria-label="復原" disabled={mode === 'play' || !past.current.length} onClick={() => history(false)}>↶</button><button aria-label="重做" disabled={mode === 'play' || !future.current.length} onClick={() => history(true)}>↷</button><span className="divider"/><button aria-label="縮小" onClick={() => { setAutoFit(false); setZoom(z => Math.max(.05,z-.1)); }}>−</button><span className="zoom">{Math.round(zoom*100)}%</span><button aria-label="放大" onClick={() => { setAutoFit(false); setZoom(z => Math.min(3,z+.1)); }}>＋</button><button onClick={() => { setAutoFit(false); setZoom(1); }}>1:1</button><button className={autoFit ? 'active' : ''} onClick={() => setAutoFit(true)}>符合視窗</button>{mode === 'edit' && <button aria-expanded={showAnalysis} onClick={() => setShowAnalysis(v => !v)}>分析</button>}</div></div>
       <div className="canvas-area"><div className="canvas-caption"><span>{mode === 'edit' ? 'LIVE CANVAS' : 'PLAY SESSION'}</span><span>{maze.width} × {maze.height} CELLS</span></div><div className="canvas-scroll"><div className="canvas-wrap" style={{ width: maze.width*CELL*zoom, height: maze.height*CELL*zoom }}><canvas aria-label="迷宮地圖，使用左側工具繪製；遊玩時以方向鍵移動" ref={canvas} style={{ width: '100%', height: '100%', cursor: mode === 'edit' ? pasting && clipboard && pasteAt && pasteError(maze, clipboard, pasteAt) ? 'not-allowed' : 'crosshair' : 'default' }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={() => pointerEnd()} onPointerCancel={() => pointerEnd(true)} onLostPointerCapture={() => pointerEnd()}/></div></div></div>

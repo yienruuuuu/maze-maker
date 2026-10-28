@@ -46,9 +46,20 @@ export function pasteSelection(maze: Maze, clip: MazeClipboard, at: Point, cut?:
   const next = cut ? clearSelection(maze, cut, true) : structuredClone(maze);
   const rect = { ...at, width: clip.width, height: clip.height };
   for (let y = 0; y < clip.height; y++) for (let x = 0; x < clip.width; x++) next.tiles[(at.y + y) * next.width + at.x + x] = clip.tiles[y * clip.width + x];
+  // Copies receive a fresh group when that name already exists outside the destination.
+  // Cuts preserve the group so moving one endpoint keeps its original partner.
+  const remaining = (next.markers ?? []).filter(m => !contains(rect, m));
+  const groups = new Set(remaining.filter(m => m.kind === 'portal').map(m => m.label));
+  const renamed = new Map<string, string>();
+  if (!cut) for (const m of clip.markers.filter(m => m.kind === 'portal')) {
+    if (renamed.has(m.label)) continue;
+    let label = m.label, n = 2;
+    while (groups.has(label)) label = `${m.label}-${n++}`;
+    renamed.set(m.label, label); groups.add(label);
+  }
   if (next.markers || clip.markers.length) next.markers = [
     ...(next.markers ?? []).filter(m => !contains(rect, m)),
-    ...clip.markers.map(m => ({ ...m, x: m.x + at.x, y: m.y + at.y })),
+    ...clip.markers.map(m => ({ ...m, label: m.kind === 'portal' ? renamed.get(m.label) ?? m.label : m.label, x: m.x + at.x, y: m.y + at.y })),
   ];
   if (next.review || clip.review.length) next.review = [
     ...(next.review ?? []).filter(m => !contains(rect, m)),
