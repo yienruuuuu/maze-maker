@@ -6,6 +6,7 @@ import { exportMaze, type SaveFilePicker } from './exportMaze';
 import { createItemArtwork, createNpcArtwork, createStairsArtwork, drawArtwork, ITEM_ART_URL, NPC_ART_URL, STAIRS_ART_URL, TILE_ART_URL, tilePreview } from './tileArtwork';
 
 import { clearSelection, copySelection, pasteError, pasteSelection, rectangle, type MazeClipboard, type Selection } from './selection';
+import { decodeClipboard, encodeClipboard } from './clipboard';
 import { markerNames, placeMarker, removeMarker, type MarkerTool } from './markers';
 
 type Tool = Tile | 'entrance' | 'exit' | 'removeExit' | MarkerTool | 'removeMarker' | 'select';
@@ -75,7 +76,8 @@ export default function App() {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [clipboard, setClipboard] = useState<MazeClipboard | null>(null);
   const [pasting, setPasting] = useState(false), [pasteAt, setPasteAt] = useState<Point | null>(null);
-  const [cutSource, setCutSource] = useState<{ rect: Selection; maze: Maze } | null>(null);
+  const [cutSource, setCutSource] = useState<{ rect: Selection; maze: Maze; token: string } | null>(null);
+  const clipboardRequest = useRef(0);
   const selectionDrag = useRef<{ start: Point; before: Selection | null } | null>(null);
   const [size, setSize] = useState({ width: 28, height: 20 });
   const canvas = useRef<HTMLCanvasElement>(null), file = useRef<HTMLInputElement>(null);
@@ -110,6 +112,7 @@ export default function App() {
   }, [maze, ready]);
   function commit(next: Maze) {
     if (JSON.stringify(next) === JSON.stringify(live.current)) return;
+    clipboardRequest.current++;
     setPasting(false); setPasteAt(null); setCutSource(null);
     past.current.push(live.current); past.current = past.current.slice(-100); future.current = [];
     setMaze(next); live.current = next; setHistoryVersion(v => v + 1); stopAnimation(); setPlayer(next.entrance); setMoves(0);
@@ -137,20 +140,57 @@ export default function App() {
     }, 65);
   }
   function cancelSelection() {
+    clipboardRequest.current++;
     selectionDrag.current = null; setSelection(null); setPasting(false); setPasteAt(null); setCutSource(null);
   }
   function chooseTool(next: Tool) { cancelSelection(); setTool(next); }
-  function copyRegion(cut = false) {
-    if (!ready || mode !== 'edit' || !selection || selectionDrag.current) return;
-    setClipboard(copySelection(live.current, selection));
-    setCutSource(cut ? { rect: selection, maze: live.current } : null);
-    setPasting(cut); setPasteAt(cut ? { x: selection.x, y: selection.y } : null);
-    setNotice(cut ? '剪下預覽：點擊目的地才搬移，Esc 取消。IN／OUT 留在原位。' : '已複製。按貼上後點擊目的地，IN／OUT 不會複製。');
+  function prepareCopy(cut: boolean) {
+    if (!ready || mode !== 'edit' || !selection || selectionDrag.current || pasting) return;
+    const clip = copySelection(live.current, selection);
+    const token = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return { clip, token, text: encodeClipboard(clip, token), rect: selection, maze: live.current, cut };
   }
-  function startPaste() {
-    if (!ready || mode !== 'edit' || !clipboard || selectionDrag.current) return;
-    setTool('select'); setPasting(true); setPasteAt(selection ? { x: selection.x, y: selection.y } : { x: 0, y: 0 });
-    setNotice(cutSource ? '剪下預覽：點擊目的地才搬移，Esc 取消。' : '貼上預覽：點擊目的地確認，Esc 取消。');
+  function copied(payload: NonNullable<ReturnType<typeof prepareCopy>>) {
+    setClipboard(payload.clip);
+    setCutSource(payload.cut ? { rect: payload.rect, maze: payload.maze, token: payload.token } : null);
+    setPasting(payload.cut); setPasteAt(payload.cut ? { x: payload.rect.x, y: payload.rect.y } : null);
+    setNotice(payload.cut ? '已複製到系統剪貼簿。原分頁點擊目的地才搬移；其他分頁貼上只會複製，Esc 取消。' : '已複製到系統剪貼簿，可切換其他分頁貼上。IN／OUT 不會複製。');
+  }
+  async function copyRegion(cut = false) {
+    const payload = prepareCopy(cut);
+    if (!payload) return;
+    const request = ++clipboardRequest.current;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('unavailable');
+      await navigator.clipboard.writeText(payload.text);
+      if (request === clipboardRequest.current && payload.maze === live.current) copied(payload);
+    } catch {
+      if (request === clipboardRequest.current) setNotice('無法寫入系統剪貼簿，請在選取範圍後按 Ctrl／⌘ C（剪下用 X）；需要允許剪貼簿權限。');
+    }
+  }
+  function previewClipboard(text: string) {
+    try {
+      const { clip, token } = decodeClipboard(text);
+      const localCut = cutSource?.token === token && cutSource.maze === live.current ? cutSource : null;
+      setClipboard(clip); setCutSource(localCut); setTool('select'); setPasting(true);
+      setPasteAt(selection ? { x: selection.x, y: selection.y } : { x: 0, y: 0 });
+      setNotice(localCut ? '剪下預覽：點擊目的地才搬移，Esc 取消。' : '貼上預覽：點擊目的地確認，Esc 取消。');
+    } catch (error) {
+      setPasting(false); setPasteAt(null); setCutSource(null);
+      setNotice(error instanceof Error ? error.message : '無法讀取迷宮選取內容。');
+    }
+  }
+  async function startPaste() {
+    if (!ready || mode !== 'edit' || selectionDrag.current || stroke.current) return;
+    const request = ++clipboardRequest.current;
+    setPasting(false); setPasteAt(null); setNotice('正在讀取系統剪貼簿…');
+    try {
+      if (!navigator.clipboard?.readText) throw new Error('unavailable');
+      const text = await navigator.clipboard.readText();
+      if (request === clipboardRequest.current) previewClipboard(text);
+    } catch {
+      if (request === clipboardRequest.current) { setPasting(false); setPasteAt(null); setNotice('無法讀取系統剪貼簿，請按 Ctrl／⌘ V 貼上，或允許瀏覽器剪貼簿權限。'); }
+    }
   }
   function deleteRegion() {
     if (!ready || mode !== 'edit' || !selection || pasting || selectionDrag.current) return;
@@ -171,7 +211,7 @@ export default function App() {
     if (tool === 'select') {
       if (pasting) { confirmPaste(p); return; }
       e.currentTarget.setPointerCapture(e.pointerId);
-      setNotice(''); selectionDrag.current = { start: p, before: selection }; setSelection(rectangle(live.current, p, p)); setCutSource(null); return;
+      clipboardRequest.current++; setNotice(''); selectionDrag.current = { start: p, before: selection }; setSelection(rectangle(live.current, p, p)); setCutSource(null); return;
     }
     if (isMarkerTool(tool) || tool === 'removeMarker') {
       const next = tool === 'removeMarker' ? removeMarker(live.current, p) : placeMarker(live.current, p, tool, markerLabel);
@@ -197,16 +237,26 @@ export default function App() {
       if ((e.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return;
       if (mode === 'edit' && e.key === 'Escape') { e.preventDefault(); cancelSelection(); setNotice(''); return; }
       if (mode === 'edit' && !stroke.current && !selectionDrag.current) {
-        const key = e.key.toLowerCase(), modifier = e.ctrlKey || e.metaKey;
-        if (modifier && (key === 'c' || key === 'x') && tool === 'select' && selection && !pasting) { e.preventDefault(); copyRegion(key === 'x'); return; }
-        if (modifier && key === 'v' && clipboard) { e.preventDefault(); startPaste(); return; }
         if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'select' && selection) { e.preventDefault(); deleteRegion(); return; }
       }
       if (mode === 'edit' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); if (!stroke.current && !selectionDrag.current) history(e.shiftKey); return; }
       const direction = ({ ArrowUp: 'up', ArrowRight: 'right', ArrowDown: 'down', ArrowLeft: 'left', w: 'up', d: 'right', s: 'down', a: 'left' } as Record<string, Direction>)[e.key];
       if (mode === 'play' && direction) { e.preventDefault(); command(direction); }
     };
-    window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener);
+    const editingText = (target: EventTarget | null) => target instanceof HTMLElement && !!target.closest('input, textarea, select, [contenteditable="true"]');
+    const copy = (e: ClipboardEvent) => {
+      if (editingText(e.target) || tool !== 'select' || !e.clipboardData) return;
+      const payload = prepareCopy(e.type === 'cut');
+      if (!payload) return;
+      e.clipboardData.setData('text/plain', payload.text); e.preventDefault();
+      clipboardRequest.current++; copied(payload);
+    };
+    const paste = (e: ClipboardEvent) => {
+      if (editingText(e.target) || !ready || mode !== 'edit' || stroke.current || selectionDrag.current || !e.clipboardData) return;
+      e.preventDefault(); clipboardRequest.current++; previewClipboard(e.clipboardData.getData('text/plain'));
+    };
+    window.addEventListener('keydown', listener); window.addEventListener('copy', copy); window.addEventListener('cut', copy); window.addEventListener('paste', paste);
+    return () => { window.removeEventListener('keydown', listener); window.removeEventListener('copy', copy); window.removeEventListener('cut', copy); window.removeEventListener('paste', paste); };
   });
   useEffect(() => {
     const el = canvas.current; if (!el) return;
@@ -347,7 +397,7 @@ export default function App() {
       <aside className="sidebar"><div className="mode-switch"><button className={mode === 'edit' ? 'active' : ''} onClick={() => { restart(); setMode('edit'); }}>✎ 編輯</button><button className={mode === 'play' ? 'active' : ''} onClick={() => { restart(); setMode('play'); }}>▷ 遊玩</button></div>
       <div className="section-label">{mode === 'edit' ? '繪製工具' : '遊玩控制'}<span>{mode === 'edit' ? 'BRUSHES' : 'CONTROLS'}</span></div>
       {mode === 'edit' ? <div className="tools">{tools.map(t => <button disabled={!ready} title={t.hint} key={t.id} className={`tool ${tool === t.id ? 'selected' : ''}`} onClick={() => chooseTool(t.id)}><span className={`tool-icon ${t.id}`} style={tilePreview(t.id)}>{t.icon}</span><span>{t.name}</span>{tool === t.id && <i/>}</button>)}</div> : <div className="play-controls"><div className="dpad">{(['up','left','down','right'] as Direction[]).map(d => <button className={d} disabled={isBusy} key={d} onClick={() => command(d)} aria-label={d}>{arrows[d]}</button>)}</div><strong>{moves} <small>次操作</small></strong><button onClick={restart}>↻ 從入口重來</button></div>}
-      {mode === 'edit' && tool === 'select' && <section className="selection-actions"><div className="section-label">選取操作</div><p className="selection-count">{pasting ? '移動滑鼠預覽，點擊貼上' : selection ? `已選 ${selection.width} × ${selection.height} 格` : '點選單格或拖曳框選'}</p><div className="selection-buttons"><button disabled={!selection || pasting} onClick={() => copyRegion()}>複製</button><button disabled={!selection || pasting} onClick={() => copyRegion(true)}>剪下</button><button disabled={!clipboard} onClick={startPaste}>貼上</button><button disabled={!selection || pasting} onClick={deleteRegion}>刪除選取</button><button disabled={!selection && !pasting} onClick={() => { cancelSelection(); setNotice(''); }}>取消選取</button></div><small>Ctrl / ⌘ C、X、V · Delete · Esc<br/>IN／OUT 不複製；刪除保留 IN。</small></section>}
+      {mode === 'edit' && tool === 'select' && <section className="selection-actions"><div className="section-label">選取操作</div><p className="selection-count">{pasting ? '移動滑鼠預覽，點擊貼上' : selection ? `已選 ${selection.width} × ${selection.height} 格` : '點選單格或拖曳框選'}</p><div className="selection-buttons"><button disabled={!selection || pasting} onClick={() => copyRegion()}>複製</button><button disabled={!selection || pasting} onClick={() => copyRegion(true)}>剪下</button><button disabled={!ready} onClick={startPaste}>貼上</button><button disabled={!selection || pasting} onClick={deleteRegion}>刪除選取</button><button disabled={!selection && !pasting} onClick={() => { cancelSelection(); setNotice(''); }}>取消選取</button></div><small>Ctrl / ⌘ C、X、V · Delete · Esc<br/>IN／OUT 不複製；刪除保留 IN。</small></section>}
       {mode === 'edit' && <section className="marker-tools"><div className="section-label">標記<span>MARKERS</span></div><div className="tools">{markerTools.map(kind => { const art = kind === 'item' ? itemArt : kind === 'stairs' ? stairsArt : npcArt; return <button key={kind} disabled={!ready} className={`tool ${tool === kind ? 'selected' : ''}`} onClick={() => { chooseTool(kind); setMarkerLabel(markerNames[kind]); }} title={`放置${markerNames[kind]}標記`}><span className="marker-preview">{art ? <img src={art.toDataURL()} alt=""/> : '◇'}</span><span>{markerNames[kind]}</span></button>; })}<button disabled={!ready} className={`tool ${tool === 'removeMarker' ? 'selected' : ''}`} onClick={() => chooseTool('removeMarker')} title="只刪除標記，保留地形與端點"><span className="tool-icon">×</span><span>刪除標記</span></button></div>{isMarkerTool(tool) && <label className="marker-name">標記名稱<input value={markerLabel} onChange={e => setMarkerLabel(e.target.value)} placeholder={markerNames[tool]}/><small>點格子放置或取代，保留原地形。</small></label>}</section>}
       {mode === 'edit' && <details className="sidebar-bottom"><summary>建立新地圖</summary><div className="size-fields"><label>寬<input type="number" min="5" max="100" value={size.width} onChange={e => setSize(s => ({ ...s, width: Number(e.target.value) }))}/></label><span>×</span><label>高<input type="number" min="5" max="100" value={size.height} onChange={e => setSize(s => ({ ...s, height: Number(e.target.value) }))}/></label></div><button className="full" disabled={!ready || !Number.isInteger(size.width) || !Number.isInteger(size.height) || size.width < 5 || size.width > 100 || size.height < 5 || size.height > 100} onClick={() => replace(blank(size.width,size.height))}>＋ 建立空白地圖</button><button className="text-button" disabled={!ready} onClick={() => replace(demo())}>載入機關範例 ↗</button></details>}</aside>
       <main className="editor"><div className="editor-toolbar"><div className="breadcrumb">迷宮工作台 <span>/</span> <b>{mode === 'edit' ? '地圖編輯' : '實際遊玩'}</b></div><div className="toolbar-actions"><button aria-label="復原" disabled={mode === 'play' || !past.current.length} onClick={() => history(false)}>↶</button><button aria-label="重做" disabled={mode === 'play' || !future.current.length} onClick={() => history(true)}>↷</button><span className="divider"/><button aria-label="縮小" onClick={() => { setAutoFit(false); setZoom(z => Math.max(.05,z-.1)); }}>−</button><span className="zoom">{Math.round(zoom*100)}%</span><button aria-label="放大" onClick={() => { setAutoFit(false); setZoom(z => Math.min(3,z+.1)); }}>＋</button><button onClick={() => { setAutoFit(false); setZoom(1); }}>1:1</button><button className={autoFit ? 'active' : ''} onClick={() => setAutoFit(true)}>符合視窗</button>{mode === 'edit' && <button aria-expanded={showAnalysis} onClick={() => setShowAnalysis(v => !v)}>分析</button>}</div></div>
